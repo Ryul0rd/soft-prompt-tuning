@@ -17,21 +17,22 @@ def main():
 
 def objective(trial):
     rng_seed = 42
-    train_size = 2048
-    val_size = 100
+    train_size = 4096
+    val_size = 500
     log_every = 1
-    validate_every = 10
+    validate_every = 100
     log_n_closest_words = 3
-    n_steps = 100
+    n_steps = 50000
 
-    batch_size = 32 #trial.suggest_categorical('batch_size', [2, 4, 6, 8]) # 4
-    sub_batch_size = 4
+    batch_size = 32 #trial.suggest_categorical('batch_size', [4, 8])
+    sub_batch_size = 2
     accumulate_grad_steps = batch_size // sub_batch_size
     n_iterations = n_steps * accumulate_grad_steps
+    validate_every *= accumulate_grad_steps
 
-    lr = 1e1 #trial.suggest_float('lr', 1e-1, 1e2, log=True) # 1e1 ?
-    weight_decay = 0. #trial.suggest_float('weight_decay', 1e-4, 1e-2, log=True) # 6e-3?
-    soft_prompt_length = 32 #trial.suggest_categorical('soft_prompt_length', [1, 2, 4, 8, 16, 24, 32]) # 4
+    lr = 0.3 #trial.suggest_float('lr', 1e-5, 1e2, log=True)
+    weight_decay = 0. #trial.suggest_float('weight_decay', 1e-4, 1e-2, log=True)
+    soft_prompt_length = 20 #trial.suggest_categorical('soft_prompt_length', [1, 2, 4, 8, 16, 24, 32])
 
     #word_list = ['movie', 'sentiment', 'classify', 'positive', 'negative'] * 4
     word_list = ['positive', 'negative'] * 2
@@ -43,7 +44,7 @@ def objective(trial):
     }
 
     device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-    model = GPT2LMHeadModel.from_pretrained('distilgpt2', low_cpu_mem_usage=True)
+    model = GPT2LMHeadModel.from_pretrained('distilgpt2', low_cpu_mem_usage=True) # 'distilgpt2', 'gpt2', 'gpt2-medium'
     model.to(device)
     tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
     tokenizer.pad_token = tokenizer.eos_token
@@ -51,7 +52,7 @@ def objective(trial):
     data = IMDBDataModule(tokenizer, sub_batch_size, train_size=train_size, val_size=val_size)
 
     d_model = model.config.n_embd
-    soft_prompt = init_soft_prompt(soft_prompt_length, d_model, device, tokenizer, embedding_matrix, strategy='uniform', word_list=word_list)
+    soft_prompt = init_soft_prompt(soft_prompt_length, d_model, device, tokenizer, embedding_matrix, strategy='word list', word_list=word_list)
     optimizer = torch.optim.Adam((soft_prompt,), lr=lr, weight_decay=weight_decay)
 
     train_loss = MeanMetric().to(device)
@@ -73,10 +74,11 @@ def objective(trial):
         batch['input_ids'] = batch['input_ids'].to(device)
         batch['labels'] = batch['labels'].to(device)
         batch = prep_batch(model, soft_prompt, batch, device)
-        output = model(inputs_embeds=batch['input_embeddings'], labels=batch['labels']).logits.transpose(1, 2)
-        loss = torch.nn.functional.cross_entropy(output, batch['labels'], ignore_index=-100)
+        output = model(inputs_embeds=batch['input_embeddings'], labels=batch['labels'])
+        #loss = torch.nn.functional.cross_entropy(output, batch['labels'], ignore_index=-100)
+        loss = output.loss
         train_loss(loss)
-        train_accuracy(output, batch['labels'])
+        train_accuracy(output.logits.transpose(1, 2), batch['labels'])
 
         if (current_iteration + 1) % (log_every * accumulate_grad_steps) == 0:
             logger.add_scalar('train/loss', train_loss.compute(), current_iteration)
@@ -118,7 +120,7 @@ def objective(trial):
                 prediction_index = (batch['labels'][i] != -100).nonzero(as_tuple=True)[0]
                 examples['prediction'].append(tokenizer.decode(torch.argmax(output.logits[i, prediction_index])))
                 examples['label'].append(batch['text_label'][i])
-            logger.add_text('examples', pd.DataFrame(examples).to_markdown(maxcolwidths=[None, 160, None, None]), current_iteration)
+            logger.add_text('examples', pd.DataFrame(examples).to_markdown(maxcolwidths=[None, 150, None, None]), current_iteration)
     logger.flush()
     logger.close()
     return val_accuracy.compute()
