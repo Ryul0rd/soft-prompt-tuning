@@ -17,12 +17,12 @@ def main():
 
 def objective(trial):
     rng_seed = 42
-    train_size = 4096
-    val_size = 500
+    train_size = 256
+    val_size = 100
     log_every = 1
-    validate_every = 100
+    validate_every = 5
     log_n_closest_words = 3
-    n_steps = 50000
+    n_steps = 500
 
     batch_size = 32 #trial.suggest_categorical('batch_size', [4, 8])
     sub_batch_size = 2
@@ -31,7 +31,7 @@ def objective(trial):
     validate_every *= accumulate_grad_steps
 
     lr = 0.3 #trial.suggest_float('lr', 1e-5, 1e2, log=True)
-    weight_decay = 0. #trial.suggest_float('weight_decay', 1e-4, 1e-2, log=True)
+    weight_decay = 8e-4 #trial.suggest_float('weight_decay', 1e-4, 1e-2, log=True)
     soft_prompt_length = 20 #trial.suggest_categorical('soft_prompt_length', [1, 2, 4, 8, 16, 24, 32])
 
     #word_list = ['movie', 'sentiment', 'classify', 'positive', 'negative'] * 4
@@ -137,7 +137,7 @@ class IMDBSoftPromptDataset(Dataset):
         original_sample = self.ds[index]
 
         token_budget = 288
-        text_label = ' positive' if original_sample['label'] else ' negative'
+        text_label = ' good' if original_sample['label'] else ' bad'
         nl = '\n'
         text = f'{original_sample["text"]}{nl}Sentiment:'
         label_token_ids = self.tokenizer(text_label, return_tensors='np').input_ids[0]
