@@ -80,6 +80,9 @@ def main():
         batch['input_ids'] = batch['input_ids'].to(device)
         batch['labels'] = batch['labels'].to(device)
         batch = prep_batch(model, soft_prompt, batch, device)
+        # print()
+        # print(batch)
+        # exit()
         output = model(inputs_embeds=batch['input_embeddings'], labels=batch['labels'])
         loss = output.loss
         train_loss(loss)
@@ -128,8 +131,8 @@ def prep_batch(model, soft_prompt, batch, device):
     '''Prepend soft prompt, snip last token off input_ids, and fix labels'''
     word_text_embedding_layer = model._modules['transformer']._modules['wte']
     sub_batch_size = batch['input_ids'].shape[0]
-    batch['input_embeddings'] = torch.concat((torch.broadcast_to(soft_prompt, size=(sub_batch_size,)+soft_prompt.shape), word_text_embedding_layer(batch['input_ids'])), dim=1)[:, :-1]
-    batch['labels'] = torch.concat((torch.full(size=(sub_batch_size, soft_prompt.shape[0]), fill_value=-100, device=device), batch['labels']), dim=1)[:, 1:]
+    batch['input_embeddings'] = torch.concat((torch.broadcast_to(soft_prompt, size=(sub_batch_size,)+soft_prompt.shape), word_text_embedding_layer(batch['input_ids'])), dim=1)
+    batch['labels'] = torch.concat((torch.full(size=(sub_batch_size, soft_prompt.shape[0]), fill_value=-100, device=device), batch['labels']), dim=1)
     return batch
 
 def write_haiku(word_list, tokenizer, soft_prompt, model):
@@ -154,10 +157,11 @@ def write_haiku(word_list, tokenizer, soft_prompt, model):
     # generate stuff!
     prompt_token_ids = prompt_token_ids.to(model.device)
     output_ids = model.generate(prompt_token_ids, pad_token_id=50256, max_new_tokens=30)
-    #clip off soft prompt ids
+    # clip off soft prompt ids
     output_ids = output_ids[0][len(soft_prompt):]
     # decode generated stuff
     output_s = tokenizer.decode(output_ids)
+    print()
     print(output_s)
 
     return output_s
@@ -183,11 +187,11 @@ class HaikuSoftPromptDataset(Dataset):
 
         # put haiku on mulitple lines
         nl = '\n'
-        haiku = original_sample.replace(' / ', nl)
+        haiku = original_sample.replace(' / ', '-')
 
         # tokenize
-        token_budget = 288
-        prompt = f'Words:{nl}{seed_words}{nl}Haiku:{nl}{original_sample}{nl}'
+        token_budget = 64
+        prompt = f'Words:{nl}{seed_words}{nl}Haiku:{nl}'
         haiku_token_ids = self.tokenizer(haiku, return_tensors='np').input_ids[0]
         prompt_token_ids = self.tokenizer(prompt, return_tensors='np', max_length=256, truncation=True).input_ids[0]
         n_pad_tokens = token_budget - (haiku_token_ids.shape[0] + prompt_token_ids.shape[0])
