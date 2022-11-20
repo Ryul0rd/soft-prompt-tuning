@@ -1,37 +1,38 @@
 import torch
 import numpy as np
 import pandas as pd
-import optuna
-from optuna.samplers import TPESampler
+# import optuna
+# from optuna.samplers import TPESampler
 from datasets import load_dataset
 from torch.utils.data import Dataset, DataLoader
-from transformers import GPT2Tokenizer, GPT2LMHeadModel
+from transformers import GPT2Tokenizer, GPT2LMHeadModel, GPTNeoForCausalLM
 from datetime import datetime
 from torchmetrics import Accuracy, MeanMetric
 from tqdm import tqdm
 from fixed_summary_writer import FixedSummaryWriter
 
 def main():
-    study = optuna.create_study(sampler=TPESampler(), direction='maximize')
-    study.optimize(objective, n_trials=1)
+    objective(0)
+    # study = optuna.create_study(sampler=TPESampler(), direction='maximize')
+    # study.optimize(objective, n_trials=1)
 
 def objective(trial):
     rng_seed = 42
-    train_size = 256
+    train_size = 20000
     val_size = 100
     log_every = 1
-    validate_every = 5
+    validate_every = 2
     log_n_closest_words = 3
     n_steps = 500
 
     batch_size = 32 #trial.suggest_categorical('batch_size', [4, 8])
-    sub_batch_size = 2
+    sub_batch_size = 1
     accumulate_grad_steps = batch_size // sub_batch_size
     n_iterations = n_steps * accumulate_grad_steps
     validate_every *= accumulate_grad_steps
 
     lr = 0.3 #trial.suggest_float('lr', 1e-5, 1e2, log=True)
-    weight_decay = 8e-4 #trial.suggest_float('weight_decay', 1e-4, 1e-2, log=True)
+    weight_decay = 0.0 #trial.suggest_float('weight_decay', 1e-4, 1e-2, log=True)
     soft_prompt_length = 20 #trial.suggest_categorical('soft_prompt_length', [1, 2, 4, 8, 16, 24, 32])
 
     #word_list = ['movie', 'sentiment', 'classify', 'positive', 'negative'] * 4
@@ -44,14 +45,15 @@ def objective(trial):
     }
 
     device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-    model = GPT2LMHeadModel.from_pretrained('distilgpt2', low_cpu_mem_usage=True) # 'distilgpt2', 'gpt2', 'gpt2-medium'
+    model = GPTNeoForCausalLM.from_pretrained('EleutherAI/gpt-neo-1.3B', low_cpu_mem_usage=True) # 'distilgpt2', 'gpt2', 'gpt2-medium', 'gpt2-large', 'EleutherAI/gpt-neo-1.3B'
     model.to(device)
-    tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
+    tokenizer = GPT2Tokenizer.from_pretrained('EleutherAI/gpt-neo-1.3B')
     tokenizer.pad_token = tokenizer.eos_token
     embedding_matrix = model._modules['transformer']._modules['wte'].weight
     data = IMDBDataModule(tokenizer, sub_batch_size, train_size=train_size, val_size=val_size)
 
-    d_model = model.config.n_embd
+    #d_model = model.config.n_embd
+    d_model = model.config.hidden_size
     soft_prompt = init_soft_prompt(soft_prompt_length, d_model, device, tokenizer, embedding_matrix, strategy='word list', word_list=word_list)
     optimizer = torch.optim.Adam((soft_prompt,), lr=lr, weight_decay=weight_decay)
 

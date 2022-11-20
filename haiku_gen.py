@@ -3,7 +3,7 @@ from torch.nn.parameter import Parameter
 import numpy as np
 import pandas as pd
 from torch.utils.data import Dataset, DataLoader
-from transformers import GPT2Tokenizer, GPT2LMHeadModel
+from transformers import GPT2Tokenizer, GPT2LMHeadModel, GPTNeoForCausalLM
 from datetime import datetime
 from torchmetrics import MeanMetric
 from tqdm import tqdm
@@ -14,12 +14,12 @@ from copy import deepcopy
 def main():
     rng_seed = 42
     log_every = 1
-    validate_every = 5
-    n_steps = 200
+    validate_every = 50
+    n_steps = 500
     train_size = 0.99
 
-    batch_size = 32
-    sub_batch_size = 2
+    batch_size = 256
+    sub_batch_size = 4
     accumulate_grad_steps = batch_size // sub_batch_size
     n_iterations = n_steps * accumulate_grad_steps
     validate_every *= accumulate_grad_steps
@@ -27,6 +27,8 @@ def main():
     lr = 0.3
     weight_decay = 0.0
     soft_prompt_length = 20
+
+    model_name = 'EleutherAI/gpt-neo-1.3B' # 'distilgpt2', 'gpt2', 'gpt2-medium' 'EleutherAI/gpt-neo-1.3B'
 
     log_gen_words = [
         'sunshine',
@@ -48,18 +50,19 @@ def main():
     }
 
     device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-    model = GPT2LMHeadModel.from_pretrained('distilgpt2', low_cpu_mem_usage=True) # 'distilgpt2', 'gpt2', 'gpt2-medium'
+    model = GPTNeoForCausalLM.from_pretrained(model_name, low_cpu_mem_usage=True)
+    #d_model = model.config.n_embd
+    d_model = model.config.hidden_size
     # extend embedding matrix to be capable of containing soft prompt tokens
     model._modules['transformer']._modules['wte'].weight = Parameter(torch.cat((
         model._modules['transformer']._modules['wte'].weight,
-        torch.zeros((soft_prompt_length, 768))
+        torch.zeros((soft_prompt_length, d_model))
     )))
     model.to(device)
-    tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
+    tokenizer = GPT2Tokenizer.from_pretrained(model_name)
     tokenizer.pad_token = tokenizer.eos_token
     data = HaikuDataModule(tokenizer, sub_batch_size, train_size=train_size)
 
-    d_model = model.config.n_embd
     soft_prompt = init_uniform_soft_prompt(soft_prompt_length, d_model, device)
     optimizer = torch.optim.Adam((soft_prompt,), lr=lr, weight_decay=weight_decay)
 
