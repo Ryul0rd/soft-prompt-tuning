@@ -1,6 +1,6 @@
 import torch
 from torch.utils.data import Dataset, DataLoader
-from transformers import GPT2Tokenizer, GPTNeoForCausalLM, GPT2LMHeadModel
+from transformers import GPT2Tokenizer, GPTNeoForCausalLM, GPTJForCausalLM, GPT2LMHeadModel
 from torchmetrics import Accuracy, MeanMetric
 from tqdm import tqdm
 import random
@@ -9,24 +9,28 @@ import numpy as np
 
 def main():
     # hyperparameters
-    soft_prompt_len = 1
-    n_iters = 10
-    validate_every = 10
+    soft_prompt_len = 50
+    n_iters = 200
+    validate_every = n_iters
     batch_size = 32
     sub_batch_size = 16
-    lr=0.1
+    lr=0.2
     weight_decay = 0.0
+    use_vocab = True
     model_name = [
         'distilgpt2',
-        'gpt2',
-        'gpt2-medium',
         'EleutherAI/gpt-neo-125M',
         'EleutherAI/gpt-neo-1.3B',
+        'EleutherAI/gpt-neo-2.7B',
+        'EleutherAI/gpt-j-6B',
+        # 'gpt2',
+        # 'gpt2-medium', # gpt2 works differently for some reason
     ][0]
     data_class = [
         ToySeqData,
         ToyCategoryData,
-    ][0]
+        ToyOverfitSentenceData,
+    ][1]
 
     assert batch_size % sub_batch_size == 0
     grad_accumulation_steps = batch_size // sub_batch_size
@@ -38,11 +42,13 @@ def main():
     tokenizer.pad_token = tokenizer.eos_token
     if 'gpt-neo' in model_name:
         lm = GPTNeoForCausalLM.from_pretrained(model_name, low_cpu_mem_usage=True).to(device)
+    elif 'gpt-j' in model_name:
+        lm = GPTJForCausalLM.from_pretrained(model_name, low_cpu_mem_usage=True).to(device)
     else:
         lm = GPT2LMHeadModel.from_pretrained(model_name, low_cpu_mem_usage=True).to(device)
 
     # soft prompt and optimizer init
-    soft_prompt = initialize_soft_prompt(lm.config.hidden_size, soft_prompt_len).to(device)
+    soft_prompt = initialize_soft_prompt(lm, soft_prompt_len, use_vocab=use_vocab).to(device)
     optimizer = torch.optim.Adam((soft_prompt,), lr=lr, weight_decay=weight_decay)
 
     # data init
@@ -87,47 +93,50 @@ def main():
                 output = soft_prompted_lm(batch, soft_prompt, lm)
                 loss = output.loss
                 val_loss(loss)
-                val_accuracy(output.logits.transpose(1, 2), batch['labels'])
+                val_accuracy(output.logits[:, :-1].transpose(1, 2), batch['labels'][:, 1:])
 
-    # debug
+    # show results
     n_examples = 3
     print(output.logits.shape)
     for i in range(n_examples):
         print(f'Example {i+1}:')
-        print('Input Text: ' + batch['input_text'][i])
-        print('Label Text: ' + batch['label_text'][i])
-        print('Prediction: ' + tokenizer.decode(torch.argmax(output.logits[i], dim=1)[batch['n_input_tokens'][i]]))
-        print()
-        print('Debug: ' + tokenizer.decode(torch.argmax(output.logits[i], dim=1)))
-        print()
+        print(f'Input Text: {batch["input_text"][i]}')
+        print(f'Label Text: {batch["label_text"][i]}')
+        print(f'Prediction: {tokenizer.decode(torch.argmax(output.logits[i], dim=1)[batch["n_input_tokens"][i]+soft_prompt_len-1])}')
     #print(train_loss.compute())
-    print(val_loss.compute())
+    print(f'Validation Loss: {val_loss.compute()}')
     #print(train_accuracy.compute())
-    print(val_accuracy.compute())
+    print(f'Validation Accuracy: {val_accuracy.compute()}')
 
-def initialize_soft_prompt(embedding_dim: int, seq_len: int=20):
-    soft_prompt = torch.distributions.uniform.Uniform(-1., 1.).sample((seq_len, embedding_dim))
+def initialize_soft_prompt(lm, seq_len: int=20, use_vocab=False):
+    if use_vocab:
+        indices = torch.randperm(lm.get_input_embeddings().weight.shape[0])[:seq_len]
+        soft_prompt = lm.get_input_embeddings().weight[indices].clone().detach()
+    else:
+        embedding_dim = lm.config.hidden_size
+        soft_prompt = torch.distributions.uniform.Uniform(-1., 1.).sample((seq_len, embedding_dim))
+    soft_prompt.requires_grad = True
     return soft_prompt
 
 def prep_batch(batch, soft_prompt, lm):
-        word_to_embedding_layer = lm._modules['transformer']._modules['wte']
-        sub_batch_size = batch['input_ids'].shape[0]
+    word_to_embedding_layer = lm.get_input_embeddings()
+    sub_batch_size = batch['input_ids'].shape[0]
 
-        # embed each input and attach the soft prompt
-        word_embeddings = word_to_embedding_layer(batch['input_ids'])
-        soft_prompts = torch.broadcast_to(soft_prompt, size=(sub_batch_size,)+soft_prompt.shape)
-        batch['input_embeddings'] = torch.concat((soft_prompts, word_embeddings), dim=1)[:, :-1]
-        null_label = -100
-        soft_prompt_padding = torch.full(size=soft_prompts.shape[:2], fill_value=null_label, device=batch['labels'].device)
-        batch['labels'] = torch.concat((soft_prompt_padding, batch['labels']), dim=1)[:, 1:]
+    # embed each input and attach the soft prompt
+    word_embeddings = word_to_embedding_layer(batch['input_ids'])
+    soft_prompts = torch.broadcast_to(soft_prompt, size=(sub_batch_size,)+soft_prompt.shape)
+    batch['input_embeddings'] = torch.concat((soft_prompts, word_embeddings), dim=1)
+    null_label = -100
+    soft_prompt_padding = torch.full(size=soft_prompts.shape[:2], fill_value=null_label, device=batch['labels'].device)
+    batch['labels'] = torch.concat((soft_prompt_padding, batch['labels']), dim=1)
 
-        return batch
+    return batch
 
 def to_device(batch, device):
-        for k, v in batch.items():
-            if isinstance(v, torch.Tensor):
-                batch[k] = v.to(device)
-        return batch
+    for k, v in batch.items():
+        if isinstance(v, torch.Tensor):
+            batch[k] = v.to(device)
+    return batch
 
 def soft_prompted_lm(batch, soft_prompt, lm):
     batch = to_device(batch, soft_prompt.device)
@@ -179,14 +188,15 @@ class ToyData(Dataset):
         # if we have n input tokens and l max length, input tokens should be: n input tokens then l - n pad tokens
         pad_token = self.tokenizer.pad_token_id
         null_label = -100
-        max_length = 64 + 1 # 1 gets snipped off later
+        max_length = 32 + 1 # 1 gets snipped off later
         n_input_tokens = len(input_ids)
+        n_label_tokens = len(label_ids)
         input_ids = np.concatenate((
             input_ids,
-            np.full(shape=(max_length - n_input_tokens,), fill_value=pad_token),
+            label_ids,
+            np.full(shape=(max_length - n_input_tokens - n_label_tokens,), fill_value=pad_token),
         ))
         # and if we have m label tokens, our labels should be: n nulls then m label tokens then l - m - n nulls
-        n_label_tokens = len(label_ids)
         label_ids = np.concatenate((
             np.full(shape=(n_input_tokens,), fill_value=null_label),
             label_ids,
@@ -281,10 +291,30 @@ class ToyCategoryData(ToyData):
 
         label_text = ' ' + odd_item_out
         input_text = ''.join([f' {item},' for item in all_items])[:-1]
+
+        # testing the addition of part descriptors
+        input_text = input_text + '\nOdd One Out:'
         
         sample = {
             'input_text': input_text,
             'label_text': label_text,
+        }
+        return sample
+
+
+class ToyOverfitSentenceData(ToyData):
+    def __init__(self, tokenizer, size: int):
+        super().__init__(tokenizer, size)
+
+    def create_sample(self):
+        '''Just produce the sentence'''
+        sentences = [
+            ' This is the first test sentence!',
+        ]
+
+        sample = {
+            'input_text': '!',
+            'label_text': random.choice(sentences),
         }
         return sample
 
