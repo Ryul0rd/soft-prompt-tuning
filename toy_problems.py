@@ -4,18 +4,17 @@ from transformers import GPT2Tokenizer, GPTNeoForCausalLM, GPTJForCausalLM, GPT2
 from torchmetrics import Accuracy, MeanMetric
 from tqdm import tqdm
 import random
-import os
 import numpy as np
 
 def main():
     # hyperparameters
-    soft_prompt_len = 50
-    n_iters = 200
-    validate_every = n_iters
+    soft_prompt_len = 10
+    n_iters = 1000
+    validate_every = 100
     batch_size = 32
-    sub_batch_size = 16
-    lr=0.2
-    weight_decay = 0.0
+    sub_batch_size = 8
+    lr=0.001
+    weight_decay = 0.
     use_vocab = True
     model_name = [
         'distilgpt2',
@@ -25,7 +24,7 @@ def main():
         'EleutherAI/gpt-j-6B',
         # 'gpt2',
         # 'gpt2-medium', # gpt2 works differently for some reason
-    ][0]
+    ][2]
     data_class = [
         ToySeqData,
         ToyCategoryData,
@@ -55,14 +54,14 @@ def main():
     train_dl = DataLoader(
         data_class(tokenizer, 10000),
         batch_size=sub_batch_size,
-        num_workers=os.cpu_count(),
+        num_workers=0,
         shuffle=True,
         drop_last=True
     )
     val_dl = DataLoader(
         data_class(tokenizer, 1000),
         batch_size=sub_batch_size,
-        num_workers=os.cpu_count()
+        num_workers=0,
     )
 
     # init metrics
@@ -85,15 +84,19 @@ def main():
         optimizer.zero_grad()
 
         # validate
-        if current_iter % validate_every == validate_every - 1:
-            lm.eval()
-            val_loss.reset()
-            val_accuracy.reset()
-            for batch in tqdm(val_dl):
-                output = soft_prompted_lm(batch, soft_prompt, lm)
-                loss = output.loss
-                val_loss(loss)
-                val_accuracy(output.logits[:, :-1].transpose(1, 2), batch['labels'][:, 1:])
+        with torch.no_grad():
+            if current_iter % validate_every == validate_every - 1:
+                lm.eval()
+                val_loss.reset()
+                val_accuracy.reset()
+                for batch in tqdm(val_dl):
+                    output = soft_prompted_lm(batch, soft_prompt, lm)
+                    loss = output.loss
+                    val_loss(loss)
+                    val_accuracy(output.logits[:, :-1].transpose(1, 2), batch['labels'][:, 1:])
+                print()
+                print(val_loss.compute())
+                print(val_accuracy.compute())
 
     # show results
     n_examples = 3
@@ -120,11 +123,11 @@ def initialize_soft_prompt(lm, seq_len: int=20, use_vocab=False):
 
 def prep_batch(batch, soft_prompt, lm):
     word_to_embedding_layer = lm.get_input_embeddings()
-    sub_batch_size = batch['input_ids'].shape[0]
+    batch_size = batch['input_ids'].shape[0]
 
     # embed each input and attach the soft prompt
     word_embeddings = word_to_embedding_layer(batch['input_ids'])
-    soft_prompts = torch.broadcast_to(soft_prompt, size=(sub_batch_size,)+soft_prompt.shape)
+    soft_prompts = torch.broadcast_to(soft_prompt, size=(batch_size,)+soft_prompt.shape)
     batch['input_embeddings'] = torch.concat((soft_prompts, word_embeddings), dim=1)
     null_label = -100
     soft_prompt_padding = torch.full(size=soft_prompts.shape[:2], fill_value=null_label, device=batch['labels'].device)
