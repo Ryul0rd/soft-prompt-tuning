@@ -1,0 +1,3 @@
+Redo haiku gen but actually get working this time :)
+What if we try creating a domain specific language? Throw out the built in vocab and just learn embeddings for things then replace the lm head to generate output
+Let's see if we can make the lm classify mnist digits by feeding it patch embeddings
