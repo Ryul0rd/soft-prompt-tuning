@@ -6,7 +6,6 @@ from torch.utils.data import Dataset, DataLoader
 from transformers import GPT2Tokenizer, GPTNeoForCausalLM
 from torchmetrics import Accuracy, MeanMetric
 from tqdm import tqdm, trange
-from itertools import cycle
 from dataclasses import dataclass
 from typing import List, Tuple, Iterable, Union
 import random
@@ -44,7 +43,7 @@ def main():
     train_accuracy = Accuracy(ignore_index=-100).to(device)
     val_accuracy = Accuracy(ignore_index=-100).to(device)
 
-    training_iterator = cycle(training_dataloader)
+    training_iterator = DataIterator(training_dataloader)
     for current_iteration in trange(n_iterations):
         train()
         if current_iteration % validate_every == validate_every - 1:
@@ -54,6 +53,22 @@ def main():
     print(batch)
     print(batch[3])
     print(batch[1:3])
+
+def train():
+    pass
+
+def validate():
+    pass
+
+def initialize_soft_prompt(lm, seq_len: int=20, use_vocab=False):
+    if use_vocab:
+        indices = torch.randperm(lm.get_input_embeddings().weight.shape[0])[:seq_len]
+        soft_prompt = lm.get_input_embeddings().weight[indices].clone().detach()
+    else:
+        embedding_dim = lm.config.hidden_size
+        soft_prompt = torch.distributions.uniform.Uniform(-1., 1.).sample((seq_len, embedding_dim))
+    soft_prompt.requires_grad = True
+    return soft_prompt
 
 def haiku_dataloaders(tokenizer, batch_size: int, num_workers: int, train_size: float=0.8) -> Tuple[DataLoader, DataLoader]:
     """Sets up haiku training and validation dataloaders"""
@@ -72,54 +87,19 @@ def haiku_dataloaders(tokenizer, batch_size: int, num_workers: int, train_size: 
 
     return training_dataloader, validation_dataloader
 
-def initialize_soft_prompt(lm, seq_len: int=20, use_vocab=False):
-    if use_vocab:
-        indices = torch.randperm(lm.get_input_embeddings().weight.shape[0])[:seq_len]
-        soft_prompt = lm.get_input_embeddings().weight[indices].clone().detach()
-    else:
-        embedding_dim = lm.config.hidden_size
-        soft_prompt = torch.distributions.uniform.Uniform(-1., 1.).sample((seq_len, embedding_dim))
-    soft_prompt.requires_grad = True
-    return soft_prompt
 
-def train():
-    pass
+class DataIterator:
+    """Iterates through a dataloader indefinitely similar to itertools.cycle but shuffles correctly"""
+    def __init__(self, dataloader):
+        self.dataloader = dataloader
+        self.iterator = iter(dataloader)
 
-def validate():
-    pass
-
-@dataclass(order=True, frozen=True)
-class HaikuData:
-    """A batch or sample of haiku data"""
-    haikus: List[str]
-    prompts: List[str]
-    input_ids: Tensor
-    labels: Tensor
-
-    def __getitem__(self, index: Union[int, slice]) -> HaikuData:
-        if isinstance(index, int):
-            index = slice(index, index + 1)
-        return HaikuData(
-            haikus = self.haikus[index],
-            prompts = self.prompts[index],
-            input_ids = self.input_ids[index],
-            labels = self.labels[index],
-        )
-
-    def __len__(self) -> int:
-        return len(self.haikus)
-
-    def to(self, device: Union[Device, str]):
-        self.input_ids.to(device)
-        self.labels.to(device)
-
-    def __post_init__(self):
-        if len(self.prompts) != len(self.haikus):
-            raise ValueError("Length of prompts must match length of haikus")
-        if len(self.input_ids) != len(self.haikus):
-            raise ValueError("Length of input_ids must match length of haikus")
-        if len(self.labels) != len(self.haikus):
-            raise ValueError("Length of labels must match length of haikus")
+    def __next__(self):
+        try:
+            return next(self.iterator)
+        except StopIteration:
+            self.iterator = iter(self.dataloader)
+            return next(self.iterator)
 
 
 class HaikuDataset(Dataset):
@@ -178,6 +158,40 @@ class HaikuDataset(Dataset):
             input_ids = torch.concatenate([sample.input_ids for sample in samples]),
             labels = torch.concatenate([sample.labels for sample in samples]),
         )
+
+@dataclass(order=True, frozen=True)
+class HaikuData:
+    """A batch or sample of haiku data"""
+    haikus: List[str]
+    prompts: List[str]
+    input_ids: Tensor
+    labels: Tensor
+
+    def __getitem__(self, index: Union[int, slice]) -> HaikuData:
+        if isinstance(index, int):
+            index = slice(index, index + 1)
+        return HaikuData(
+            haikus = self.haikus[index],
+            prompts = self.prompts[index],
+            input_ids = self.input_ids[index],
+            labels = self.labels[index],
+        )
+
+    def __len__(self) -> int:
+        return len(self.haikus)
+
+    def to(self, device: Union[Device, str]):
+        self.input_ids.to(device)
+        self.labels.to(device)
+
+    def __post_init__(self):
+        if len(self.prompts) != len(self.haikus):
+            raise ValueError("Length of prompts must match length of haikus")
+        if len(self.input_ids) != len(self.haikus):
+            raise ValueError("Length of input_ids must match length of haikus")
+        if len(self.labels) != len(self.haikus):
+            raise ValueError("Length of labels must match length of haikus")
+
 
 if __name__ == "__main__":
     main()
