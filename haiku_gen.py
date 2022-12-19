@@ -4,7 +4,7 @@ from torch import tensor, Tensor
 from torch import device as Device
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import Optimizer, Adam
-from transformers import PreTrainedTokenizer, PreTrainedModel, GPT2Tokenizer, GPTNeoForCausalLM
+from transformers import PreTrainedTokenizer, PreTrainedModel, GPT2Tokenizer, GPTNeoForCausalLM, StoppingCriteriaList, MaxLengthCriteria, BeamSearchScorer
 from torchmetrics import Accuracy, MeanMetric
 from tqdm import tqdm, trange
 from dataclasses import dataclass
@@ -13,8 +13,8 @@ import random
 
 def main():
     soft_prompt_len = 10
-    n_iterations = 10
-    validate_every = 10
+    n_iterations = 1000
+    validate_every = 100
     batch_size = 32
     sub_batch_size = 8
     lr=0.001
@@ -38,6 +38,9 @@ def main():
     model = GPTNeoForCausalLM.from_pretrained(model_name, low_cpu_mem_usage=True).to(device)
     soft_prompt = initialize_soft_prompt(model, soft_prompt_len, use_vocab=use_vocab).to(device)
     optimizer = Adam((soft_prompt,), lr=lr, weight_decay=weight_decay)
+
+    # monkey patch model to work with input embeds
+    model.prepare_inputs_for_generation = prepare_inputs_for_generation
 
     train_loss_metric = MeanMetric().to(device)
     validation_loss_metric = MeanMetric().to(device)
@@ -64,7 +67,22 @@ def main():
             print()
             newline = "\n"
             print(f'Validation Loss: {validation_loss}')
-            print(f'Example:{newline}{generate(["seed"], tokenizer, soft_prompt, model)}')
+
+            seed_words = [
+                "beauty",
+                "sunlight",
+                "imagination",
+                "programming",
+                "electric",
+            ]
+            chosen_seed_words = []
+            for _ in range(random.randint(2, 3)):
+                chosen_word = random.choice(seed_words)
+                chosen_seed_words.append(chosen_word)
+                seed_words.remove(chosen_word)
+            seed_words = chosen_seed_words
+
+            print(f'Example:{newline}{greedy_generate(seed_words, tokenizer, soft_prompt, model)}')
 
 def train(
     soft_prompt: Tensor,
@@ -105,7 +123,7 @@ def validate(
     
     return loss_metric.compute()
 
-def generate(
+def greedy_generate(
     seed_words: List[str],
     tokenizer: PreTrainedTokenizer,
     soft_prompt: Tensor,
@@ -113,31 +131,26 @@ def generate(
     ):
     device = model.device
     newline = "\n"
-    seed_words = [
-        "beauty",
-        "sunlight",
-        "imagination",
-        "programming",
-        "electric",
-    ]
-    seed_words = seed_words[:2]
+
+    seed_words = ', '.join(seed_words[:2])
 
     prompt = f"Words: {seed_words}{newline}Haiku:{newline}"
-    prompt_token_ids = tokenizer(prompt, return_tensors='pt').input_ids[0].to(device)
+    prompt_token_ids = tokenizer(prompt, return_tensors='pt').input_ids.to(device)
 
     word_to_embedding_layer = model.get_input_embeddings()
     word_embeddings = word_to_embedding_layer(prompt_token_ids)
-    input_embeddings = torch.concat((soft_prompt, word_embeddings), dim=0)
+    inputs_embeds = torch.concat((soft_prompt.unsqueeze(dim=0), word_embeddings), dim=1)
 
-    generated_ids = []
-    for _ in range(30):
-        next_token_probs = model(inputs_embeds=input_embeddings)
-    generated_ids = torch.cat(generated_ids, dim=0)
-    generated_text = tokenizer.decode(generated_ids)
+    input_ids = torch.LongTensor([[model.config.bos_token_id]]).to(device)
+    stopping_criteria = StoppingCriteriaList([MaxLengthCriteria(max_length=30)])
 
-    generated_ids = model.generate(inputs_embeds=input_embeddings, pad_token_id=50256, max_new_tokens=30)
+    outputs = model.greedy_search(
+        input_ids, inputs_embeds=inputs_embeds, stopping_criteria=stopping_criteria, pad_token_id=model.config.eos_token_id
+    )
+    generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    prompt_and_generated_text = prompt + generated_text
 
-    return generated_text
+    return prompt_and_generated_text
 
 def initialize_soft_prompt(model: PreTrainedModel, seq_len: int=20, use_vocab=False):
     if use_vocab:
@@ -294,6 +307,40 @@ class HaikuData:
         if len(self.labels) != len(self.haikus):
             raise ValueError("Length of labels must match length of haikus")
 
+def prepare_inputs_for_generation(input_ids, past=None, **kwargs):
+    token_type_ids = kwargs.get("token_type_ids", None)
+    # only last token for inputs_ids if past is defined in kwargs
+    if past:
+        input_ids = input_ids[:, -1].unsqueeze(-1)
+        if token_type_ids is not None:
+            token_type_ids = token_type_ids[:, -1].unsqueeze(-1)
+
+    attention_mask = kwargs.get("attention_mask", None)
+    position_ids = kwargs.get("position_ids", None)
+
+    if attention_mask is not None and position_ids is None:
+        # create position_ids on the fly for batch generation
+        position_ids = attention_mask.long().cumsum(-1) - 1
+        position_ids.masked_fill_(attention_mask == 0, 1)
+        if past:
+            position_ids = position_ids[:, -1].unsqueeze(-1)
+    else:
+        position_ids = None
+
+    # !!!!!!!!!!!!!!!!!!! start: modified vs original, to pass inputs_embeds when they are available
+    if "inputs_embeds" in kwargs and past is None:  # we only want to use them in the 1st generation step
+        model_inputs = {"inputs_embeds": kwargs["inputs_embeds"]}
+    else:
+        model_inputs = {"input_ids": input_ids}
+    model_inputs.update({
+        "past_key_values": past,
+        "use_cache": kwargs.get("use_cache"),
+        "position_ids": position_ids,
+        "attention_mask": attention_mask,
+        "token_type_ids": token_type_ids,
+    })
+    return model_inputs
+    # !!!!!!!!!!!!!!!!!!! end: modified vs original, to pass inputs_embeds when they are available
 
 if __name__ == "__main__":
     main()
