@@ -4,7 +4,17 @@ from torch import tensor, Tensor
 from torch import device as Device
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import Optimizer, Adam
-from transformers import PreTrainedTokenizer, PreTrainedModel, GPT2Tokenizer, GPTNeoForCausalLM, StoppingCriteriaList, MaxLengthCriteria, BeamSearchScorer
+from transformers import (
+    PreTrainedTokenizer,
+    PreTrainedModel,
+    GPT2Tokenizer,
+    GPTNeoForCausalLM,
+    StoppingCriteriaList,
+    MaxLengthCriteria,
+    BeamSearchScorer,
+    LogitsProcessorList,
+    MinLengthLogitsProcessor,
+)
 from torchmetrics import Accuracy, MeanMetric
 from tqdm import tqdm, trange
 from dataclasses import dataclass
@@ -12,7 +22,7 @@ from typing import List, Tuple, Iterable, Union, Optional
 import random
 
 def main():
-    soft_prompt_len = 10
+    soft_prompt_len = 20
     n_iterations = 1000
     validate_every = 100
     batch_size = 32
@@ -24,7 +34,7 @@ def main():
         'EleutherAI/gpt-neo-125M',
         'EleutherAI/gpt-neo-1.3B',
         'EleutherAI/gpt-neo-2.7B',
-    ][0]
+    ][1]
 
     if batch_size % sub_batch_size != 0:
         raise ValueError("batch_size must be an integer multiple of sub_batch_size")
@@ -82,7 +92,7 @@ def main():
                 seed_words.remove(chosen_word)
             seed_words = chosen_seed_words
 
-            print(f'Example:{newline}{greedy_generate(seed_words, tokenizer, soft_prompt, model)}')
+            print(f'Example:{newline}{beam_generate(seed_words, tokenizer, soft_prompt, model)}')
 
 def train(
     soft_prompt: Tensor,
@@ -131,8 +141,7 @@ def greedy_generate(
     ):
     device = model.device
     newline = "\n"
-
-    seed_words = ', '.join(seed_words[:2])
+    seed_words = ', '.join(seed_words)
 
     prompt = f"Words: {seed_words}{newline}Haiku:{newline}"
     prompt_token_ids = tokenizer(prompt, return_tensors='pt').input_ids.to(device)
@@ -146,6 +155,57 @@ def greedy_generate(
 
     outputs = model.greedy_search(
         input_ids, inputs_embeds=inputs_embeds, stopping_criteria=stopping_criteria, pad_token_id=model.config.eos_token_id
+    )
+    generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    prompt_and_generated_text = prompt + generated_text
+
+    return prompt_and_generated_text
+
+def beam_generate(
+    seed_words: List[str],
+    tokenizer: PreTrainedTokenizer,
+    soft_prompt: Tensor,
+    model: PreTrainedModel,
+    temperature: float = 0.9
+    ):
+    device = model.device
+    newline = "\n"
+    seed_words = ', '.join(seed_words)
+
+    prompt = f"Words: {seed_words}{newline}Haiku:{newline}"
+    prompt_token_ids = tokenizer(prompt, return_tensors='pt').input_ids.to(device)
+
+    num_beams = 3
+
+    prompt_token_ids = prompt_token_ids.broadcast_to((num_beams, prompt_token_ids.shape[1]))
+
+    word_to_embedding_layer = model.get_input_embeddings()
+    word_embeddings = word_to_embedding_layer(prompt_token_ids)
+    inputs_embeds = torch.concat(
+        (soft_prompt.broadcast_to((num_beams,) + soft_prompt.shape), word_embeddings),
+        dim=1,
+    )
+
+    input_ids = torch.LongTensor([[model.config.bos_token_id]]).broadcast_to((num_beams, 1)).to(device)
+    stopping_criteria = StoppingCriteriaList([MaxLengthCriteria(max_length=30)])
+    logits_processor = LogitsProcessorList([MinLengthLogitsProcessor(5, eos_token_id=model.config.eos_token_id),])
+    beam_scorer = BeamSearchScorer(
+        batch_size=1,
+        num_beams=num_beams,
+        device=device,
+        #length_penalty=generation_config.length_penalty,
+        #do_early_stopping=generation_config.early_stopping,
+        num_beam_hyps_to_keep=1,
+    )
+
+    outputs = model.beam_search(
+        input_ids,
+        beam_scorer,
+        inputs_embeds=inputs_embeds,
+        temperature=temperature,
+        logits_processor=logits_processor,
+        stopping_criteria=stopping_criteria,
+        pad_token_id=model.config.eos_token_id
     )
     generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
     prompt_and_generated_text = prompt + generated_text
